@@ -55,7 +55,7 @@ type Config struct {
 	SkipVersionCheck     bool     `mapstructure:"skip_version_check"`
 	UseSFTP              bool     `mapstructure:"use_sftp"`
 	InventoryDirectory   string   `mapstructure:"inventory_directory"`
-	inventoryFile        string
+	InventoryFile        string   `mapstructure:"inventory_file"`
 }
 
 type Provisioner struct {
@@ -123,6 +123,14 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		}
 	} else {
 		p.config.LocalPort = "0"
+	}
+
+	if len(p.config.InventoryFile) > 0 {
+		err = validateInventoryDirectoryConfig(p.config.InventoryFile)
+		if err != nil {
+			log.Println(p.config.InventoryDirectory, "does not exist")
+			errs = packer.MultiErrorAppend(errs, err)
+		}
 	}
 
 	if len(p.config.InventoryDirectory) > 0 {
@@ -260,40 +268,39 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 
 	go p.adapter.Serve()
 
-	if len(p.config.inventoryFile) == 0 {
-		tf, err := ioutil.TempFile(p.config.InventoryDirectory, "packer-provisioner-ansible")
-		if err != nil {
-			return fmt.Errorf("Error preparing inventory file: %s", err)
-		}
-		defer os.Remove(tf.Name())
-
-		host := fmt.Sprintf("%s ansible_host=127.0.0.1 ansible_user=%s ansible_port=%s\n",
-			p.config.HostAlias, p.config.User, p.config.LocalPort)
-		if p.ansibleMajVersion < 2 {
-			host = fmt.Sprintf("%s ansible_ssh_host=127.0.0.1 ansible_ssh_user=%s ansible_ssh_port=%s\n",
-				p.config.HostAlias, p.config.User, p.config.LocalPort)
-		}
-
-		w := bufio.NewWriter(tf)
-		w.WriteString(host)
-		for _, group := range p.config.Groups {
-			fmt.Fprintf(w, "[%s]\n%s", group, host)
-		}
-
-		for _, group := range p.config.EmptyGroups {
-			fmt.Fprintf(w, "[%s]\n", group)
-		}
-
-		if err := w.Flush(); err != nil {
-			tf.Close()
-			return fmt.Errorf("Error preparing inventory file: %s", err)
-		}
-		tf.Close()
-		p.config.inventoryFile = tf.Name()
-		defer func() {
-			p.config.inventoryFile = ""
-		}()
+	tf, err := ioutil.TempFile(p.config.InventoryDirectory, "packer-provisioner-ansible")
+	if err != nil {
+		return fmt.Errorf("Error preparing inventory file: %s", err)
 	}
+	defer os.Remove(tf.Name())
+
+	host := fmt.Sprintf("%s ansible_host=127.0.0.1 ansible_user=%s ansible_port=%s\n",
+		p.config.HostAlias, p.config.User, p.config.LocalPort)
+	if p.ansibleMajVersion < 2 {
+		host = fmt.Sprintf("%s ansible_ssh_host=127.0.0.1 ansible_ssh_user=%s ansible_ssh_port=%s\n",
+			p.config.HostAlias, p.config.User, p.config.LocalPort)
+	}
+
+	w := bufio.NewWriter(tf)
+	w.WriteString(host)
+	for _, group := range p.config.Groups {
+		fmt.Fprintf(w, "[%s]\n%s", group, host)
+	}
+
+	for _, group := range p.config.EmptyGroups {
+		fmt.Fprintf(w, "[%s]\n", group)
+	}
+
+	if err := w.Flush(); err != nil {
+		tf.Close()
+		return fmt.Errorf("Error preparing inventory file: %s", err)
+	}
+	tf.Close()
+
+	defer func() {
+		p.config.InventoryFile = ""
+		p.config.InventoryDirectory = ""
+	}()
 
 	if err := p.executeAnsible(ui, comm, k.privKeyFile); err != nil {
 		return fmt.Errorf("Error executing Ansible: %s", err)
@@ -314,7 +321,7 @@ func (p *Provisioner) Cancel() {
 
 func (p *Provisioner) executeAnsible(ui packer.Ui, comm packer.Communicator, privKeyFile string) error {
 	playbook, _ := filepath.Abs(p.config.PlaybookFile)
-	inventory := p.config.inventoryFile
+	inventory := p.config.InventoryFile
 	var envvars []string
 
 	args := []string{"--extra-vars", fmt.Sprintf("packer_build_name=%s packer_builder_type=%s",
